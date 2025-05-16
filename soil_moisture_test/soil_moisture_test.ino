@@ -2,36 +2,36 @@
 
 // Pin definitions
 #define SOIL_MOISTURE_PIN 34  // Soil moisture sensor pin
-#define PUMP_LED 27           // Green LED to indicate pump would be working
+#define PUMP_RELAY_27 27      // Pump relay on GPIO27 (same as in main.ino)
 
-// Soil moisture calibration values
-const int AIR_VALUE = 3000;    // Replace with the sensor reading in dry air
-const int WATER_VALUE = 1500;  // Replace with the sensor reading in water
+// Soil moisture calibration values - using the same values from main.ino
+const int AIR_VALUE = 3000;    // Sensor reading in dry air
+const int WATER_VALUE = 1500;  // Sensor reading in water
 
 // Soil moisture thresholds
-const int LOW_MOISTURE_THRESHOLD = 20;   // Below this percentage, turn on pump LED
-const int HIGH_MOISTURE_THRESHOLD = 70;  // Above this percentage, turn off pump LED
+const int LOW_MOISTURE_THRESHOLD = 20;   // Below this percentage, turn on pump
+const int HIGH_MOISTURE_THRESHOLD = 70;  // Above this percentage, turn off pump
 
 void setup() {
   Serial.begin(9600);
   
-  // Set up output pin for LED
-  pinMode(PUMP_LED, OUTPUT);
+  // Set up output pin for relay
+  pinMode(PUMP_RELAY_27, OUTPUT);
   
-  // Initialize LED to OFF (HIGH for relay-based systems)
-  digitalWrite(PUMP_LED, HIGH);
+  // Initialize relay to OFF (HIGH for relay modules means OFF)
+  digitalWrite(PUMP_RELAY_27, HIGH);
   
-  Serial.println("Soil Moisture Sensor Test");
-  Serial.println("------------------------");
+  Serial.println("ESP32 Soil Moisture Sensor Test");
+  Serial.println("------------------------------");
   Serial.println("This test will read soil moisture values and");
-  Serial.println("turn on the pump LED when moisture is below threshold.");
+  Serial.println("activate the pump relay when moisture is below threshold.");
   Serial.println();
 }
 
 void loop() {
   // Read soil moisture
   int rawValue = readSoilMoisture();
-  int moisturePercentage = getSoilMoisturePercentage(rawValue);
+  int moisturePercentage = getSoilMoisturePercentage();
   
   // Print values to serial monitor
   Serial.print("Raw Moisture Value: ");
@@ -40,16 +40,16 @@ void loop() {
   Serial.print(moisturePercentage);
   Serial.println("%");
   
-  // Control pump LED based on moisture level
+  // Control pump relay based on moisture level
   if (moisturePercentage < LOW_MOISTURE_THRESHOLD) {
-    digitalWrite(PUMP_LED, LOW);  // Turn ON pump LED (LOW activates)
-    Serial.println("Soil is DRY - Pump LED ON");
+    digitalWrite(PUMP_RELAY_27, LOW);  // Turn ON pump (LOW activates relay)
+    Serial.println("Soil is DRY - Pump ON");
   } else if (moisturePercentage > HIGH_MOISTURE_THRESHOLD) {
-    digitalWrite(PUMP_LED, HIGH); // Turn OFF pump LED (HIGH deactivates)
-    Serial.println("Soil is WET - Pump LED OFF");
+    digitalWrite(PUMP_RELAY_27, HIGH); // Turn OFF pump (HIGH deactivates relay)
+    Serial.println("Soil is WET - Pump OFF");
   }
   
-  Serial.println("------------------------");
+  Serial.println("------------------------------");
   
   // Wait before next reading
   delay(1000);
@@ -61,7 +61,9 @@ int readSoilMoisture() {
 }
 
 // Convert raw value to percentage
-int getSoilMoisturePercentage(int rawValue) {
+int getSoilMoisturePercentage() {
+  int rawValue = readSoilMoisture();
+  
   // Ensure rawValue is within the expected range
   if (rawValue > AIR_VALUE) {
     rawValue = AIR_VALUE;

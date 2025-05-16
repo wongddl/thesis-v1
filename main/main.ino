@@ -66,6 +66,9 @@ const unsigned long sensorReadInterval = 10000;  // 10 seconds
 const int LOW_MOISTURE_THRESHOLD = 45;   // Below this percentage, start watering
 const int HIGH_MOISTURE_THRESHOLD = 65;  // Above this percentage, stop watering
 
+// In the variables section, add a state variable for the pump toggle
+bool pumpToggleState = false;  // Track if pump is toggled on or off
+
 void setup() {
   Serial.begin(9600);
   
@@ -108,8 +111,8 @@ void loop() {
     // Handle manual button inputs (physical)
     handleManualButtons();
     
-    // Check if we need to turn off the pump after 1 second
-    checkTimedOutputs();
+    // No need to check timed outputs anymore
+    // checkTimedOutputs();
   }
   
   // Periodically read and send sensor data regardless of mode
@@ -126,22 +129,28 @@ BLYNK_WRITE(MODE_TOGGLE_PIN) {
   
   // Turn off pump when switching modes
   digitalWrite(PUMP_RELAY_27, HIGH);
-  pumpActive = false;
+  pumpToggleState = false;
+  
+  // Update Blynk button state
+  Blynk.virtualWrite(PUMP_CONTROL_PIN, 0);
   
   Serial.print("Mode changed from Blynk to: ");
   Serial.println(isAutomatedMode ? "Automated" : "Manual");
 }
 
 BLYNK_WRITE(PUMP_CONTROL_PIN) {
-  if (!isAutomatedMode && param.asInt() == 1) {
-    // Turn on pump and start timer
-    digitalWrite(PUMP_RELAY_27, LOW);
-    pumpStartTime = millis();
-    pumpActive = true;
-    Serial.println("Manual (Blynk): Pump turned ON for 1 second");
+  if (!isAutomatedMode) {
+    pumpToggleState = param.asInt();
     
-    // Reset button state after 1 second
-    Blynk.syncVirtual(PUMP_CONTROL_PIN);
+    if (pumpToggleState) {
+      // Turn pump ON
+      digitalWrite(PUMP_RELAY_27, LOW);  // LOW activates the relay (pump ON)
+      Serial.println("Manual (Blynk): Pump toggled ON");
+    } else {
+      // Turn pump OFF
+      digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH deactivates the relay (pump OFF)
+      Serial.println("Manual (Blynk): Pump toggled OFF");
+    }
   }
 }
 
@@ -181,10 +190,11 @@ void checkModeButton() {
       
       // Turn off pump when switching modes
       digitalWrite(PUMP_RELAY_27, HIGH);
-      pumpActive = false;
+      pumpToggleState = false;
       
-      // Update Blynk button state
+      // Update Blynk button states
       Blynk.virtualWrite(MODE_TOGGLE_PIN, isAutomatedMode ? 1 : 0);
+      Blynk.virtualWrite(PUMP_CONTROL_PIN, 0);
       
       Serial.print("Mode changed by physical button to: ");
       Serial.println(isAutomatedMode ? "Automated" : "Manual");
@@ -274,30 +284,38 @@ void runAutomatedSequence() {
 }
 
 void handleManualButtons() {
-  // Handle pump button
+  // Handle pump button as a toggle
   int buttonPumpReading = digitalRead(BUTTON_PUMP);
   
   if (buttonPumpReading != lastButtonPumpState) {
-    if (buttonPumpReading == LOW) {  // Button pressed (LOW due to pull-up)
-      // Turn on pump and start timer
-      digitalWrite(PUMP_RELAY_27, LOW);  // LOW activates the relay (pump ON)
-      pumpStartTime = millis();
-      pumpActive = true;
-      Serial.println("Manual: Pump turned ON for 1 second");
+    // Wait for debounce
+    delay(50);
+    
+    // Read the button again to make sure it's still pressed
+    buttonPumpReading = digitalRead(BUTTON_PUMP);
+    
+    if (buttonPumpReading == LOW && lastButtonPumpState == HIGH) {  // Button pressed (LOW due to pull-up)
+      // Toggle pump state
+      pumpToggleState = !pumpToggleState;
+      
+      if (pumpToggleState) {
+        // Turn pump ON
+        digitalWrite(PUMP_RELAY_27, LOW);  // LOW activates the relay (pump ON)
+        Serial.println("Manual: Pump toggled ON");
+        
+        // Update Blynk button state
+        Blynk.virtualWrite(PUMP_CONTROL_PIN, 1);
+      } else {
+        // Turn pump OFF
+        digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH deactivates the relay (pump OFF)
+        Serial.println("Manual: Pump toggled OFF");
+        
+        // Update Blynk button state
+        Blynk.virtualWrite(PUMP_CONTROL_PIN, 0);
+      }
     }
+    
     lastButtonPumpState = buttonPumpReading;
-    delay(50);  // Simple debounce
-  }
-}
-
-void checkTimedOutputs() {
-  unsigned long currentMillis = millis();
-  
-  // Turn off pump after duration
-  if (pumpActive && (currentMillis - pumpStartTime >= activeDuration)) {
-    digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH deactivates the relay (pump OFF)
-    pumpActive = false;
-    Serial.println("Manual: Pump turned OFF after timeout");
   }
 }
 

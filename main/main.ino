@@ -77,8 +77,8 @@ unsigned long lastSensorReadTime = 0;
 const unsigned long sensorReadInterval = 10000;  // 10 seconds
 
 // Add soil moisture thresholds
-const int LOW_MOISTURE_THRESHOLD = 20;   // Below this percentage, start watering
-const int HIGH_MOISTURE_THRESHOLD = 70;  // Above this percentage, stop watering
+const int LOW_MOISTURE_THRESHOLD = 45;   // Below this percentage, start watering
+const int HIGH_MOISTURE_THRESHOLD = 65;  // Above this percentage, stop watering
 
 void setup() {
   Serial.begin(9600);

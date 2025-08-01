@@ -85,7 +85,7 @@ void setup() {
   digitalWrite(PUMP_RELAY_27, HIGH);  // Initialize to HIGH (relay inactive, pump OFF)
   
   // Connect to Blynk
-  Blynk.begin(BLYNK_AUTH_TOKEN, "Salmentar2.4g", "Salmentar434!");
+  Blynk.begin(BLYNK_AUTH_TOKEN, "TP-Link_2AD8", "jenovah20");
   
   // Initialize Blynk button states
   Blynk.virtualWrite(MODE_TOGGLE_PIN, isAutomatedMode ? 1 : 0);

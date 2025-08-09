@@ -7,6 +7,38 @@
 #include <Arduino.h>
 #include <DHT11.h>
 #include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+
+// WiFi credentials array - add your networks here
+struct WiFiCredentials {
+  const char* ssid;
+  const char* password;
+};
+
+WiFiCredentials wifiNetworks[] = {
+  {"Donti", "veryUniquePassword"},
+  {"Jayannsprgz", "mwaamwaa"},
+  {"Hotspot", "waaypasswordnospace"},
+  {"PLDTHOMEFIBRJtEp8", "PLDTWIFIMhS5x"},
+  {"GRHE, B@kalanay@2025"},
+  {"TP-Link_2AD8", "jenovah20"},
+};
+
+const int NUM_WIFI_NETWORKS = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
+int currentWiFiIndex = 0;
+unsigned long wifiConnectStartTime = 0;
+const unsigned long WIFI_TIMEOUT = 10000; // 10 seconds timeout per network
+
+// OLED display configuration
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Pin definitions for sensors
 #define SOIL_MOISTURE_PIN 34 // Soil moisture sensor pin
@@ -69,8 +101,132 @@ const int HIGH_MOISTURE_THRESHOLD = 65;  // Above this percentage, stop watering
 // In the variables section, add a state variable for the pump toggle
 bool pumpToggleState = false;  // Track if pump is toggled on or off
 
+// OLED display variables
+unsigned long lastDisplayUpdate = 0;
+const unsigned long displayUpdateInterval = 1000;  // Update display every 1 second
+
+// Multi-error tracking system
+bool oledError = false;        // O - OLED display error
+bool dhtError = false;         // HT - DHT11 sensor error (temperature + humidity)
+bool moistureError = false;    // M - Moisture sensor error
+bool blynkError = false;       // B - Blynk connection error
+bool wifiError = false;        // W - WiFi connection error
+
+// Error tracking variables
+bool blynkConnected = false;
+unsigned long lastBlynkCheck = 0;
+const unsigned long blynkCheckInterval = 5000;  // Check Blynk connection every 5 seconds
+bool moistureSensorError = false;
+unsigned long lastMoistureRead = 0;
+
+// Function to print current network info
+void printNetworkInfo() {
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("=== Network Information ===");
+    Serial.print("Connected to: ");
+    Serial.println(wifiNetworks[currentWiFiIndex].ssid);
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("Signal Strength: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+    Serial.print("Blynk Status: ");
+    Serial.println(blynkConnected ? "Connected" : "Disconnected");
+    Serial.println("===========================");
+  } else {
+    Serial.println("No WiFi connection");
+  }
+}
+
+// Current sensor values for display
+float currentTemperature = 0.0;
+float currentHumidity = 0.0;
+int currentSoilMoisture = 0;
+
+// WiFi connection functions
+bool connectToWiFi() {
+  Serial.println("Scanning for available WiFi networks...");
+  
+  for (int attempt = 0; attempt < NUM_WIFI_NETWORKS; attempt++) {
+    currentWiFiIndex = attempt;
+    
+    Serial.print("Trying WiFi ");
+    Serial.print(attempt + 1);
+    Serial.print("/");
+    Serial.print(NUM_WIFI_NETWORKS);
+    Serial.print(": ");
+    Serial.println(wifiNetworks[currentWiFiIndex].ssid);
+    
+    WiFi.begin(wifiNetworks[currentWiFiIndex].ssid, wifiNetworks[currentWiFiIndex].password);
+    wifiConnectStartTime = millis();
+    
+    // Wait for connection with timeout
+    while (WiFi.status() != WL_CONNECTED && (millis() - wifiConnectStartTime < WIFI_TIMEOUT)) {
+      delay(500);
+      Serial.print(".");
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println();
+      Serial.print("Connected to: ");
+      Serial.println(wifiNetworks[currentWiFiIndex].ssid);
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
+      return true;
+    } else {
+      Serial.println(" Failed!");
+      WiFi.disconnect();
+      delay(1000); // Brief delay before trying next network
+    }
+  }
+  
+  Serial.println("Failed to connect to any WiFi network!");
+  return false;
+}
+
+bool reconnectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return true; // Already connected
+  }
+  
+  Serial.println("Attempting WiFi reconnection...");
+  
+  // Try current network first
+  Serial.print("Retrying: ");
+  Serial.println(wifiNetworks[currentWiFiIndex].ssid);
+  
+  WiFi.begin(wifiNetworks[currentWiFiIndex].ssid, wifiNetworks[currentWiFiIndex].password);
+  wifiConnectStartTime = millis();
+  
+  while (WiFi.status() != WL_CONNECTED && (millis() - wifiConnectStartTime < WIFI_TIMEOUT)) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println(" Reconnected!");
+    return true;
+  }
+  
+  Serial.println(" Failed, trying other networks...");
+  
+  // If current network fails, try all networks again
+  return connectToWiFi();
+}
+
 void setup() {
   Serial.begin(9600);
+  
+  // Initialize OLED display
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    oledError = true;
+  } else {
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.display();
+    Serial.println("OLED display initialized successfully");
+  }
   
   // Set up output pins
   pinMode(PUMP_RELAY_27, OUTPUT);
@@ -84,17 +240,79 @@ void setup() {
   digitalWrite(LED_MODE, isAutomatedMode ? HIGH : LOW);
   digitalWrite(PUMP_RELAY_27, HIGH);  // Initialize to HIGH (relay inactive, pump OFF)
   
-  // Connect to Blynk
-  Blynk.begin(BLYNK_AUTH_TOKEN, "TP-Link_2AD8", "jenovah20");
+  // Connect to WiFi first (cycle through available networks)
+  Serial.println("Starting WiFi connection...");
+  bool wifiConnected = connectToWiFi();
   
-  // Initialize Blynk button states
-  Blynk.virtualWrite(MODE_TOGGLE_PIN, isAutomatedMode ? 1 : 0);
-  Blynk.virtualWrite(PUMP_CONTROL_PIN, 0);
+  if (wifiConnected) {
+    // Print network information
+    printNetworkInfo();
+    
+    // Connect to Blynk (non-blocking)
+    Serial.println("Attempting Blynk connection...");
+    Blynk.begin(BLYNK_AUTH_TOKEN, wifiNetworks[currentWiFiIndex].ssid, wifiNetworks[currentWiFiIndex].password);
+    
+    // Check initial connection status without blocking
+    if (Blynk.connected()) {
+      blynkConnected = true;
+      Serial.println("Blynk connected immediately!");
+      
+      // Initialize Blynk button states
+      Blynk.virtualWrite(MODE_TOGGLE_PIN, isAutomatedMode ? 1 : 0);
+      Blynk.virtualWrite(PUMP_CONTROL_PIN, 0);
+    } else {
+      blynkConnected = false;
+      Serial.println("Blynk not connected initially - will retry in background");
+      // Don't set error code here, let the loop handle connection monitoring
+    }
+  } else {
+    blynkConnected = false;
+    Serial.println("No WiFi connection - Blynk unavailable");
+  }
   
-  Serial.println("System started in Automated Mode");
+  Serial.println("System started in Automated Mode - proceeding regardless of Blynk status");
+  
+  // Initial display update
+  updateDisplay();
 }
 
 void loop() {
+  // Check WiFi and Blynk connection status periodically
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastBlynkCheck >= blynkCheckInterval) {
+    lastBlynkCheck = currentMillis;
+    
+    // First check WiFi status
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi disconnected, attempting reconnection...");
+      blynkConnected = false; // Blynk can't work without WiFi
+      
+      // Try to reconnect WiFi
+      if (reconnectWiFi()) {
+        Serial.println("WiFi reconnected, attempting Blynk reconnection...");
+        Blynk.begin(BLYNK_AUTH_TOKEN, wifiNetworks[currentWiFiIndex].ssid, wifiNetworks[currentWiFiIndex].password);
+      }
+    } else {
+      // WiFi is connected, check Blynk
+      if (Blynk.connected()) {
+        if (!blynkConnected) {
+          // Blynk reconnected
+          blynkConnected = true;
+          Serial.println("Blynk reconnected!");
+          // Connection restored - let updateErrorCodes handle clearing the error
+        }
+      } else {
+        if (blynkConnected) {
+          // Lost Blynk connection
+          blynkConnected = false;
+          Serial.println("Blynk connection lost - system continues normally");
+          // Don't immediately set error code - let updateErrorCodes handle it with delay
+        }
+      }
+    }
+  }
+  
+  // Always try to run Blynk (it handles disconnection gracefully)
   Blynk.run();
   
   // Check mode toggle button (physical)
@@ -116,15 +334,22 @@ void loop() {
   }
   
   // Periodically read and send sensor data regardless of mode
-  unsigned long currentMillis = millis();
   if (currentMillis - lastSensorReadTime >= sensorReadInterval) {
     lastSensorReadTime = currentMillis;
     readAndSendAllSensorData();
+  }
+  
+  // Update OLED display periodically
+  if (currentMillis - lastDisplayUpdate >= displayUpdateInterval) {
+    lastDisplayUpdate = currentMillis;
+    updateDisplay();
   }
 }
 
 // Blynk handlers
 BLYNK_WRITE(MODE_TOGGLE_PIN) {
+  if (!blynkConnected) return;  // Don't process if not connected
+  
   isAutomatedMode = param.asInt();
   
   // Turn off pump when switching modes
@@ -132,13 +357,17 @@ BLYNK_WRITE(MODE_TOGGLE_PIN) {
   pumpToggleState = false;
   
   // Update Blynk button state
-  Blynk.virtualWrite(PUMP_CONTROL_PIN, 0);
+  if (blynkConnected) {
+    Blynk.virtualWrite(PUMP_CONTROL_PIN, 0);
+  }
   
   Serial.print("Mode changed from Blynk to: ");
   Serial.println(isAutomatedMode ? "Automated" : "Manual");
 }
 
 BLYNK_WRITE(PUMP_CONTROL_PIN) {
+  if (!blynkConnected) return;  // Don't process if not connected
+  
   if (!isAutomatedMode) {
     pumpToggleState = param.asInt();
     
@@ -155,18 +384,24 @@ BLYNK_WRITE(PUMP_CONTROL_PIN) {
 }
 
 BLYNK_WRITE(MANUAL_READ_ALL_PIN) {
+  if (!blynkConnected) return;  // Don't process if not connected
+  
   if (param.asInt() == 1) {
     readAndSendAllSensorData();
   }
 }
 
 BLYNK_WRITE(MANUAL_READ_TEMP_HUM_PIN) {
+  if (!blynkConnected) return;  // Don't process if not connected
+  
   if (param.asInt() == 1) {
     readAndSendTempHumidity();
   }
 }
 
 BLYNK_WRITE(MANUAL_READ_MOISTURE_PIN) {
+  if (!blynkConnected) return;  // Don't process if not connected
+  
   if (param.asInt() == 1) {
     readAndSendMoisture();
   }
@@ -304,14 +539,18 @@ void handleManualButtons() {
         Serial.println("Manual: Pump toggled ON");
         
         // Update Blynk button state
-        Blynk.virtualWrite(PUMP_CONTROL_PIN, 1);
+        if (blynkConnected) {
+          Blynk.virtualWrite(PUMP_CONTROL_PIN, 1);
+        }
       } else {
         // Turn pump OFF
         digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH deactivates the relay (pump OFF)
         Serial.println("Manual: Pump toggled OFF");
         
         // Update Blynk button state
-        Blynk.virtualWrite(PUMP_CONTROL_PIN, 0);
+        if (blynkConnected) {
+          Blynk.virtualWrite(PUMP_CONTROL_PIN, 0);
+        }
       }
     }
     
@@ -326,7 +565,28 @@ int readSoilMoisture() {
 
 int getSoilMoisturePercentage() {
   int rawValue = readSoilMoisture();
-
+  lastMoistureRead = millis();
+  
+  // Check for sensor errors
+  // If reading is 0 or 4095 (max ADC value), sensor might be disconnected
+  if (rawValue == 0 || rawValue >= 4095) {
+    moistureSensorError = true;
+    Serial.print("Moisture sensor error - Raw value: ");
+    Serial.println(rawValue);
+    return currentSoilMoisture; // Return last known good value
+  }
+  
+  // Check if reading is extremely out of range (indicates sensor problem)
+  if (rawValue > (AIR_VALUE + 500) || rawValue < (WATER_VALUE - 200)) {
+    moistureSensorError = true;
+    Serial.print("Moisture sensor out of range - Raw value: ");
+    Serial.println(rawValue);
+    return currentSoilMoisture; // Return last known good value
+  }
+  
+  // If we get here, sensor reading seems valid
+  moistureSensorError = false;
+  
   // Ensure rawValue is within the expected range
   if (rawValue > AIR_VALUE) {
     rawValue = AIR_VALUE;
@@ -349,22 +609,48 @@ void readAndSendTempHumidity() {
     Serial.print(humidity);
     Serial.println(" %");
     
+    // Update current values for display
+    currentTemperature = temperature;
+    currentHumidity = humidity;
+    
+    // Clear DHT error if it was previously set
+    if (dhtError) {
+      dhtError = false;
+    }
+    
     // Send to Blynk
     Blynk.virtualWrite(V0, temperature);
     Blynk.virtualWrite(V1, humidity);
   } else {
     Serial.println(DHT11::getErrorString(dht_result));
+    dhtError = true;
   }
 }
 
 void readAndSendMoisture() {
   int soilMoisturePercentage = getSoilMoisturePercentage();
-  Serial.print("Soil Moisture: ");
-  Serial.print(soilMoisturePercentage);
-  Serial.println(" %");
   
-  // Send to Blynk
-  Blynk.virtualWrite(V3, soilMoisturePercentage);
+  if (moistureSensorError) {
+    Serial.println("Moisture sensor error detected!");
+    moistureError = true;
+  } else {
+    Serial.print("Soil Moisture: ");
+    Serial.print(soilMoisturePercentage);
+    Serial.println(" %");
+    
+    // Update current value for display
+    currentSoilMoisture = soilMoisturePercentage;
+    
+    // Clear moisture error if it was previously set
+    if (moistureError) {
+      moistureError = false;
+    }
+    
+    // Send to Blynk only if connected
+    if (blynkConnected) {
+      Blynk.virtualWrite(V3, soilMoisturePercentage);
+    }
+  }
 }
 
 void readAndSendAllSensorData() {
@@ -372,30 +658,166 @@ void readAndSendAllSensorData() {
   int temperature = 0;
   int humidity = 0;
   int dht_result = dht11.readTemperatureHumidity(temperature, humidity);
+  bool currentDhtError = false;
+  
   if (dht_result == 0) {
     Serial.print("Temperature: ");
     Serial.print(temperature);
     Serial.print(" °C\tHumidity: ");
     Serial.print(humidity);
     Serial.println(" %");
+    
+    // Update current values for display
+    currentTemperature = temperature;
+    currentHumidity = humidity;
+    currentDhtError = false;
   } else {
     Serial.println(DHT11::getErrorString(dht_result));
+    currentDhtError = true;
     // Set to default values or previous values if reading fails
-    temperature = 0;
-    humidity = 0;
+    temperature = currentTemperature;
+    humidity = currentHumidity;
   }
   
   // Read soil moisture
   int soilMoisturePercentage = getSoilMoisturePercentage();
-  Serial.print("Soil Moisture: ");
-  Serial.print(soilMoisturePercentage);
-  Serial.println(" %");
   
-  // Send all data to Blynk at once
-  Blynk.virtualWrite(V0, temperature);
-  Blynk.virtualWrite(V1, humidity);
-  Blynk.virtualWrite(V3, soilMoisturePercentage);
+  if (!moistureSensorError) {
+    Serial.print("Soil Moisture: ");
+    Serial.print(soilMoisturePercentage);
+    Serial.println(" %");
+    
+    // Update current value for display
+    currentSoilMoisture = soilMoisturePercentage;
+  }
+  
+  // Update error codes based on current sensor states
+  updateErrorCodes(currentDhtError, moistureSensorError, !blynkConnected);
+  
+  // Send all data to Blynk at once (only if connected)
+  if (blynkConnected) {
+    Blynk.virtualWrite(V0, temperature);
+    Blynk.virtualWrite(V1, humidity);
+    Blynk.virtualWrite(V3, soilMoisturePercentage);
+  }
   
   // Optional: Print a separator for better serial monitor readability
   Serial.println("------------------------------");
+}
+
+// Function to manage multiple error codes
+void updateErrorCodes(bool dhtErr, bool moistErr, bool blynkErr) {
+  // Update individual error flags
+  dhtError = dhtErr;
+  moistureError = moistErr;
+  
+  // Update WiFi error status
+  wifiError = (WiFi.status() != WL_CONNECTED);
+  
+  // Handle Blynk error with startup delay
+  if (blynkErr && millis() > 30000) {  // Wait 30 seconds after startup
+    blynkError = true;
+  } else if (!blynkErr) {
+    blynkError = false;
+  }
+  // Note: oledError is set separately during setup and doesn't change
+}
+
+// Function to generate combined error code string
+String getErrorCodeString() {
+  String errorStr = "";
+  
+  if (oledError) errorStr += "O ";
+  if (dhtError) errorStr += "HT ";
+  if (moistureError) errorStr += "M ";
+  if (wifiError) errorStr += "W ";
+  if (blynkError) errorStr += "B ";
+  
+  return errorStr;
+}
+
+void updateDisplay() {
+  if (oledError) {
+    return; // Don't try to update if OLED failed to initialize
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);  // Set all text to size 1
+  
+  // Header with mode status
+  display.setCursor(0, 0);
+  display.print("Mode: ");
+  display.print(isAutomatedMode ? "AUTO" : "MANUAL");
+  
+  // Pump status
+  display.setCursor(75, 0);
+  display.print("Pump:");
+  display.setCursor(110, 0);
+  if (pumpToggleState || (isAutomatedMode && digitalRead(PUMP_RELAY_27) == LOW)) {
+    display.print("ON");
+  } else {
+    display.print("OFF");
+  }
+  
+  // Separator line
+  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+  
+  // Soil moisture section (PRIORITY - TOP)
+  display.setCursor(0, 15);
+  display.print("Soil:");
+  display.setCursor(35, 15);
+  display.print(currentSoilMoisture);
+  display.setCursor(65, 15);
+  display.print("%");
+  
+  // Soil moisture status text
+  display.setCursor(85, 15);
+  if (currentSoilMoisture < 30) {
+    display.print("DRY");
+  } else if (currentSoilMoisture < 60) {
+    display.print("OK");
+  } else {
+    display.print("WET");
+  }
+  
+  // Soil moisture progress bar
+  int barWidth = 120;
+  int barHeight = 8;
+  int barX = 4;
+  int barY = 25;
+  
+  // Draw progress bar outline
+  display.drawRect(barX, barY, barWidth, barHeight, SSD1306_WHITE);
+  
+  // Fill progress bar based on soil moisture percentage
+  int fillWidth = map(currentSoilMoisture, 0, 100, 0, barWidth - 2);
+  display.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, SSD1306_WHITE);
+  
+  // Temperature and Humidity section (LOWER - Two columns in one row)
+  // Temperature (Left column)
+  display.setCursor(0, 40);
+  display.print("T:");
+  display.setCursor(20, 40);
+  display.print(currentTemperature, 1);
+  display.setCursor(45, 40);
+  display.print("C");
+  
+  // Humidity (Right column)
+  display.setCursor(70, 40);
+  display.print("H:");
+  display.setCursor(90, 40);
+  display.print(currentHumidity, 1);
+  display.setCursor(115, 40);
+  display.print("%");
+  
+  // Error code display on line 50 (as requested)
+  String errorCodes = getErrorCodeString();
+  if (errorCodes != "") {
+    display.setCursor(0, 50);
+    display.print("ERR!:");
+    display.setCursor(40, 50);
+    display.print(errorCodes);
+  }
+  
+  display.display();
 } 

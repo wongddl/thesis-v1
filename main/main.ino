@@ -19,11 +19,8 @@ struct WiFiCredentials {
 };
 
 WiFiCredentials wifiNetworks[] = {
-  {"Donti", "veryUniquePassword"},
   {"Jayannsprgz", "mwaamwaa"},
   {"Hotspot", "waaypasswordnospace"},
-  {"PLDTHOMEFIBRJtEp8", "PLDTWIFIMhS5x"},
-  {"GRHE, B@kalanay@2025"},
   {"TP-Link_2AD8", "jenovah20"},
 };
 

@@ -42,6 +42,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Pin definitions for sensors
 #define SOIL_MOISTURE_PIN 34 // Soil moisture sensor pin
+#define WATER_SENSOR_PIN 35  // Water level sensor pin (added for water level monitoring)
 DHT11 dht11(0);             // DHT11 on GPIO0
 
 // Pin definitions for relays and LEDs
@@ -54,8 +55,10 @@ DHT11 dht11(0);             // DHT11 on GPIO0
 #define MODE_TOGGLE_PIN V4
 #define MANUAL_READ_ALL_PIN V5
 #define MANUAL_READ_TEMP_HUM_PIN V6
+#define MANUAL_READ_WATER_LEVEL_PIN V7        // Manual water level reading
 #define MANUAL_READ_MOISTURE_PIN V8
 #define PUMP_CONTROL_PIN V9
+#define WATER_LEVEL_PIN V2                // Water level data pin
 
 // Variables for mode control
 bool isAutomatedMode = true;  // Start in automated mode by default
@@ -98,6 +101,11 @@ const unsigned long sensorReadInterval = 10000;  // 10 seconds
 const int LOW_MOISTURE_THRESHOLD = 45;   // Below this percentage, start watering
 const int HIGH_MOISTURE_THRESHOLD = 65;  // Above this percentage, stop watering
 
+// Water level sensor calibration data (from watersensor_test.ino)
+const int waterCalibrationPoints[6] = {0, 1497, 1735, 1852, 1902, 1946};  // ADC values
+const int waterCalibrationLevels[6] = {0, 20, 40, 60, 80, 100};           // Corresponding percentages
+const int WATER_THRESHOLD = 194;  // Water detection threshold
+
 // In the variables section, add a state variable for the pump toggle
 bool pumpToggleState = false;  // Track if pump is toggled on or off
 
@@ -109,6 +117,7 @@ const unsigned long displayUpdateInterval = 1000;  // Update display every 1 sec
 bool oledError = false;        // O - OLED display error
 bool dhtError = false;         // HT - DHT11 sensor error (temperature + humidity)
 bool moistureError = false;    // M - Moisture sensor error
+bool waterLevelError = false;  // L - Water level sensor error
 bool blynkError = false;       // B - Blynk connection error
 bool wifiError = false;        // W - WiFi connection error
 
@@ -142,6 +151,65 @@ void printNetworkInfo() {
 float currentTemperature = 0.0;
 float currentHumidity = 0.0;
 int currentSoilMoisture = 0;
+int currentWaterLevel = 0;               // Current water level percentage
+
+// Water level sensor functions
+int getInterpolatedWaterLevel(int adcValue) {
+  // If value is below or at dry level
+  if (adcValue <= waterCalibrationPoints[0]) {
+    return 0;
+  }
+  
+  // If value is above or at wet level
+  if (adcValue >= waterCalibrationPoints[5]) {
+    return 100;
+  }
+  
+  // Find which two calibration points the current reading falls between
+  for (int i = 0; i < 5; i++) {
+    if (adcValue >= waterCalibrationPoints[i] && adcValue <= waterCalibrationPoints[i + 1]) {
+      // Linear interpolation between two points
+      int x1 = waterCalibrationPoints[i];
+      int x2 = waterCalibrationPoints[i + 1];
+      int y1 = waterCalibrationLevels[i];
+      int y2 = waterCalibrationLevels[i + 1];
+      
+      // y = y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+      int result = y1 + (adcValue - x1) * (y2 - y1) / (x2 - x1);
+      return constrain(result, 0, 100);
+    }
+  }
+  
+  // Fallback (shouldn't reach here)
+  return map(adcValue, waterCalibrationPoints[0], waterCalibrationPoints[5], 0, 100);
+}
+
+int getWaterLevelPercentage() {
+  int rawValue = analogRead(WATER_SENSOR_PIN);
+  
+  // Check for sensor errors
+  // If reading is 0 or 4095 (max ADC value), sensor might be disconnected
+  if (rawValue == 0 || rawValue >= 4095) {
+    waterLevelError = true;
+    Serial.print("Water level sensor error - Raw value: ");
+    Serial.println(rawValue);
+    return currentWaterLevel; // Return last known good value
+  }
+  
+  // Check if reading is extremely out of range (indicates sensor problem)
+  if (rawValue > (waterCalibrationPoints[5] + 500) || rawValue < -200) {
+    waterLevelError = true;
+    Serial.print("Water level sensor out of range - Raw value: ");
+    Serial.println(rawValue);
+    return currentWaterLevel; // Return last known good value
+  }
+  
+  // If we get here, sensor reading seems valid
+  waterLevelError = false;
+  
+  // Convert to percentage using multi-point interpolation
+  return getInterpolatedWaterLevel(rawValue);
+}
 
 // WiFi connection functions
 bool connectToWiFi() {
@@ -236,9 +304,9 @@ void setup() {
   pinMode(BUTTON_MODE, INPUT_PULLUP);
   pinMode(BUTTON_PUMP, INPUT_PULLUP);
   
-  // Initialize outputs based on initial mode - HIGH means relays are OFF
+  // Initialize outputs based on initial mode - LOW means pump is OFF
   digitalWrite(LED_MODE, isAutomatedMode ? HIGH : LOW);
-  digitalWrite(PUMP_RELAY_27, HIGH);  // Initialize to HIGH (relay inactive, pump OFF)
+  digitalWrite(PUMP_RELAY_27, LOW);  // Initialize to LOW (pump OFF)
   
   // Connect to WiFi first (cycle through available networks)
   Serial.println("Starting WiFi connection...");
@@ -353,7 +421,7 @@ BLYNK_WRITE(MODE_TOGGLE_PIN) {
   isAutomatedMode = param.asInt();
   
   // Turn off pump when switching modes
-  digitalWrite(PUMP_RELAY_27, HIGH);
+  digitalWrite(PUMP_RELAY_27, LOW);  // LOW = pump OFF
   pumpToggleState = false;
   
   // Update Blynk button state
@@ -373,11 +441,11 @@ BLYNK_WRITE(PUMP_CONTROL_PIN) {
     
     if (pumpToggleState) {
       // Turn pump ON
-      digitalWrite(PUMP_RELAY_27, LOW);  // LOW activates the relay (pump ON)
+      digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH = pump ON
       Serial.println("Manual (Blynk): Pump toggled ON");
     } else {
       // Turn pump OFF
-      digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH deactivates the relay (pump OFF)
+      digitalWrite(PUMP_RELAY_27, LOW);  // LOW = pump OFF
       Serial.println("Manual (Blynk): Pump toggled OFF");
     }
   }
@@ -396,6 +464,14 @@ BLYNK_WRITE(MANUAL_READ_TEMP_HUM_PIN) {
   
   if (param.asInt() == 1) {
     readAndSendTempHumidity();
+  }
+}
+
+BLYNK_WRITE(MANUAL_READ_WATER_LEVEL_PIN) {
+  if (!blynkConnected) return;  // Don't process if not connected
+  
+  if (param.asInt() == 1) {
+    readAndSendWaterLevel();
   }
 }
 
@@ -424,7 +500,7 @@ void checkModeButton() {
       isAutomatedMode = !isAutomatedMode;
       
       // Turn off pump when switching modes
-      digitalWrite(PUMP_RELAY_27, HIGH);
+      digitalWrite(PUMP_RELAY_27, LOW);  // LOW = pump OFF
       pumpToggleState = false;
       
       // Update Blynk button states
@@ -466,7 +542,7 @@ void runAutomatedSequence() {
           stateStartTime = currentMillis;
           
           // Start watering by activating pump
-          digitalWrite(PUMP_RELAY_27, LOW);  // LOW activates the relay (pump ON)
+          digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH = pump ON
           Serial.println("Automated: Pump ON for watering");
         } else {
           // Soil moisture is adequate, stay in idle but reset timer
@@ -501,7 +577,7 @@ void runAutomatedSequence() {
         
         // If moisture is above threshold, stop watering
         if (soilMoisturePercentage >= HIGH_MOISTURE_THRESHOLD) {
-          digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH deactivates the relay (pump OFF)
+          digitalWrite(PUMP_RELAY_27, LOW);  // LOW = pump OFF
           Serial.print("Automated: Target moisture reached (");
           Serial.print(soilMoisturePercentage);
           Serial.println("%), pump OFF");
@@ -535,7 +611,7 @@ void handleManualButtons() {
       
       if (pumpToggleState) {
         // Turn pump ON
-        digitalWrite(PUMP_RELAY_27, LOW);  // LOW activates the relay (pump ON)
+        digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH = pump ON
         Serial.println("Manual: Pump toggled ON");
         
         // Update Blynk button state
@@ -544,7 +620,7 @@ void handleManualButtons() {
         }
       } else {
         // Turn pump OFF
-        digitalWrite(PUMP_RELAY_27, HIGH);  // HIGH deactivates the relay (pump OFF)
+        digitalWrite(PUMP_RELAY_27, LOW);  // LOW = pump OFF
         Serial.println("Manual: Pump toggled OFF");
         
         // Update Blynk button state
@@ -653,6 +729,26 @@ void readAndSendMoisture() {
   }
 }
 
+void readAndSendWaterLevel() {
+  int waterLevelPercentage = getWaterLevelPercentage();
+  
+  if (waterLevelError) {
+    Serial.println("Water level sensor error detected!");
+  } else {
+    Serial.print("Water Level: ");
+    Serial.print(waterLevelPercentage);
+    Serial.println(" %");
+    
+    // Update current value for display
+    currentWaterLevel = waterLevelPercentage;
+    
+    // Send to Blynk only if connected
+    if (blynkConnected) {
+      Blynk.virtualWrite(WATER_LEVEL_PIN, waterLevelPercentage);
+    }
+  }
+}
+
 void readAndSendAllSensorData() {
   // Read DHT11 (temperature and humidity)
   int temperature = 0;
@@ -691,14 +787,27 @@ void readAndSendAllSensorData() {
     currentSoilMoisture = soilMoisturePercentage;
   }
   
+  // Read water level
+  int waterLevelPercentage = getWaterLevelPercentage();
+  
+  if (!waterLevelError) {
+    Serial.print("Water Level: ");
+    Serial.print(waterLevelPercentage);
+    Serial.println(" %");
+    
+    // Update current value for display
+    currentWaterLevel = waterLevelPercentage;
+  }
+  
   // Update error codes based on current sensor states
-  updateErrorCodes(currentDhtError, moistureSensorError, !blynkConnected);
+  updateErrorCodes(currentDhtError, moistureSensorError, waterLevelError, !blynkConnected);
   
   // Send all data to Blynk at once (only if connected)
   if (blynkConnected) {
     Blynk.virtualWrite(V0, temperature);
     Blynk.virtualWrite(V1, humidity);
     Blynk.virtualWrite(V3, soilMoisturePercentage);
+    Blynk.virtualWrite(WATER_LEVEL_PIN, waterLevelPercentage);
   }
   
   // Optional: Print a separator for better serial monitor readability
@@ -706,10 +815,11 @@ void readAndSendAllSensorData() {
 }
 
 // Function to manage multiple error codes
-void updateErrorCodes(bool dhtErr, bool moistErr, bool blynkErr) {
+void updateErrorCodes(bool dhtErr, bool moistErr, bool waterLevelErr, bool blynkErr) {
   // Update individual error flags
   dhtError = dhtErr;
   moistureError = moistErr;
+  waterLevelError = waterLevelErr; // Add water level error tracking
   
   // Update WiFi error status
   wifiError = (WiFi.status() != WL_CONNECTED);
@@ -730,6 +840,7 @@ String getErrorCodeString() {
   if (oledError) errorStr += "O ";
   if (dhtError) errorStr += "HT ";
   if (moistureError) errorStr += "M ";
+  if (waterLevelError) errorStr += "L "; // Add water level error to string
   if (wifiError) errorStr += "W ";
   if (blynkError) errorStr += "B ";
   
@@ -742,82 +853,143 @@ void updateDisplay() {
   }
   
   display.clearDisplay();
-  display.setTextSize(1);  // Set all text to size 1
   
-  // Header with mode status
-  display.setCursor(0, 0);
-  display.print("Mode: ");
-  display.print(isAutomatedMode ? "AUTO" : "MANUAL");
-  
-  // Pump status
-  display.setCursor(75, 0);
-  display.print("Pump:");
-  display.setCursor(110, 0);
-  if (pumpToggleState || (isAutomatedMode && digitalRead(PUMP_RELAY_27) == LOW)) {
-    display.print("ON");
-  } else {
-    display.print("OFF");
-  }
-  
-  // Separator line
-  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
-  
-  // Soil moisture section (PRIORITY - TOP)
-  display.setCursor(0, 15);
-  display.print("Soil:");
-  display.setCursor(35, 15);
-  display.print(currentSoilMoisture);
-  display.setCursor(65, 15);
-  display.print("%");
-  
-  // Soil moisture status text
-  display.setCursor(85, 15);
-  if (currentSoilMoisture < 30) {
-    display.print("DRY");
-  } else if (currentSoilMoisture < 60) {
-    display.print("OK");
-  } else {
-    display.print("WET");
-  }
-  
-  // Soil moisture progress bar
-  int barWidth = 120;
-  int barHeight = 8;
-  int barX = 4;
-  int barY = 25;
-  
-  // Draw progress bar outline
-  display.drawRect(barX, barY, barWidth, barHeight, SSD1306_WHITE);
-  
-  // Fill progress bar based on soil moisture percentage
-  int fillWidth = map(currentSoilMoisture, 0, 100, 0, barWidth - 2);
-  display.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, SSD1306_WHITE);
-  
-  // Temperature and Humidity section (LOWER - Two columns in one row)
-  // Temperature (Left column)
-  display.setCursor(0, 40);
-  display.print("T:");
-  display.setCursor(20, 40);
-  display.print(currentTemperature, 1);
-  display.setCursor(45, 40);
-  display.print("C");
-  
-  // Humidity (Right column)
-  display.setCursor(70, 40);
-  display.print("H:");
-  display.setCursor(90, 40);
-  display.print(currentHumidity, 1);
-  display.setCursor(115, 40);
-  display.print("%");
-  
-  // Error code display on line 50 (as requested)
-  String errorCodes = getErrorCodeString();
-  if (errorCodes != "") {
-    display.setCursor(0, 50);
-    display.print("ERR!:");
-    display.setCursor(40, 50);
-    display.print(errorCodes);
-  }
+  drawModeIndicators();
+  drawSensorReadings();
+  drawPumpStatus();
+  drawErrorMessage();
   
   display.display();
+}
+
+void drawModeIndicators() {
+  // "MODE" label vertically on the left
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print(F("m"));
+  display.setCursor(0, 6);
+  display.print(F("o"));
+  display.setCursor(0, 13);
+  display.print(F("d"));
+  display.setCursor(0, 19);
+  display.print(F("e"));
+  
+  // Mode selection box (moved right)
+  display.drawRect(8, 0, 16, 35, SSD1306_WHITE);
+  display.drawLine(8, 17, 22, 17, SSD1306_WHITE);
+  
+  // Automatic mode indicator (top half)
+  display.setTextSize(2);
+  if (isAutomatedMode) {
+    display.setTextColor(SSD1306_BLACK, SSD1306_WHITE); // Inverted when on
+    display.fillRect(9, 1, 14, 15, SSD1306_WHITE);
+  } else {
+    display.setTextColor(SSD1306_WHITE);
+  }
+  display.setCursor(11, 2);
+  display.print(F("A"));
+  
+  // Manual mode indicator (bottom half)
+  if (!isAutomatedMode) {
+    display.setTextColor(SSD1306_BLACK, SSD1306_WHITE); // Inverted when on
+    display.fillRect(9, 18, 14, 16, SSD1306_WHITE);
+  } else {
+    display.setTextColor(SSD1306_WHITE);
+  }
+  display.setCursor(11, 19);
+  display.print(F("M"));
+}
+
+void drawSensorReadings() {
+  display.setTextColor(SSD1306_WHITE);
+  
+  // Temperature section
+  display.setTextSize(1);
+  display.setCursor(35, 0);
+  display.print(F("TEMP"));
+  
+  display.setTextSize(2);
+  display.setCursor(45, 9);
+  display.printf("%.0f", currentTemperature);
+  
+  display.setTextSize(1);
+  display.setCursor(70, 9);
+  display.print(F("c"));
+  
+  // Humidity section
+  display.setTextSize(1);
+  display.setCursor(82, 0);
+  display.print(F("HUM"));
+  
+  display.setTextSize(2);
+  display.setCursor(90, 9);
+  display.print((int)currentHumidity);
+  
+  display.setTextSize(1);
+  display.setCursor(114, 9);
+  display.print(F("%"));
+  
+  // Soil moisture section
+  display.setTextSize(1);
+  display.setCursor(35, 27);
+  display.print(F("MOIST"));
+  
+  display.setTextSize(2);
+  display.setCursor(45, 39);
+  display.print(currentSoilMoisture);
+  
+  display.setTextSize(1);
+  display.setCursor(69, 39);
+  display.print(F("%"));
+  
+  // Water level section
+  display.setTextSize(1);
+  display.setCursor(81, 27);
+  display.print(F("WLVL"));
+  
+  display.setTextSize(2);
+  display.setCursor(89, 39);
+  display.print(currentWaterLevel);
+  
+  display.setTextSize(1);
+  display.setCursor(114, 39);
+  display.print(F("%"));
+}
+
+void drawPumpStatus() {
+  // "PUMP" label vertically on the left
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 36);
+  display.print(F("p"));
+  display.setCursor(0, 43);
+  display.print(F("u"));
+  display.setCursor(0, 49);
+  display.print(F("m"));
+  display.setCursor(0, 55);
+  display.print(F("p"));
+
+  // Pump status indicator (circle) moved to the right
+  int circleX = 15; // X position for the circle
+  int circleY = 50; // Y position for the circle
+  int radius   = 7;
+
+  bool isPumpOn = (pumpToggleState || (isAutomatedMode && digitalRead(PUMP_RELAY_27) == HIGH));
+  if (isPumpOn) {
+    display.fillCircle(circleX, circleY, radius, SSD1306_WHITE); // Filled circle = ON
+  } else {
+    display.drawCircle(circleX, circleY, radius, SSD1306_WHITE); // Empty circle = OFF
+  }
+}
+
+void drawErrorMessage() {
+  String errorCodes = getErrorCodeString();
+  if (errorCodes != "") {
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(35, 56);
+    display.print("E: ");
+    display.print(errorCodes);
+  }
 } 
